@@ -1,0 +1,21 @@
+# Local capture data
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+
+# Generated analysis dumps from local experiments
+*_analysis.json
+*.csv
+
+# macOS build outputs
+build/
+*.app/
+
+# Python caches
+__pycache__/
+.pytest_cache/
+
+# Editor/OS noise
+.DS_Store

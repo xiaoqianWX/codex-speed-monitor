@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+import json
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+APP_SUPPORT = Path.home() / "Library" / "Application Support" / "CodexSpeedMonitor"
+DB = Path(os.environ.get("CODEX_TELEMETRY_DB", str(APP_SUPPORT / "codex_telemetry.sqlite"))).expanduser()
+
+def resolve_codex():
+    override = os.environ.get("CODEX_TRACKED_REAL_CODEX")
+    if override:
+        return override
+    for candidate in (
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex",
+        str(Path.home() / ".local" / "bin" / "codex"),
+    ):
+        if Path(candidate).exists():
+            return candidate
+    return "codex"
+
+REAL_CODEX = resolve_codex()
+
+SCHEMA = """
+create table if not exists cli_invocations (
+  invocation_id text primary key,
+  started_at text not null,
+  ended_at text,
+  cwd text not null,
+  argv_json text not null,
+  command text,
+  model_override text,
+  reasoning_effort_override text,
+  service_tier_override text,
+  fast_mode_override text,
+  thread_id text,
+  usage_json text,
+  exit_code integer
+);
+"""
+
+def iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def ensure_db():
+    DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB)
+    conn.executescript(SCHEMA)
+    return conn
+
+def parse_overrides(args):
+    pairs = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-c", "--config") and i + 1 < len(args):
+            pairs.append(args[i + 1])
+            i += 2
+            continue
+        if a.startswith("-c="):
+            pairs.append(a[3:])
+        elif a.startswith("--config="):
+            pairs.append(a[len("--config="):])
+        i += 1
+    out = {}
+    for p in pairs:
+        if "=" not in p:
+            continue
+        k, v = p.split("=", 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return {
+        "model_override": out.get("model"),
+        "reasoning_effort_override": out.get("model_reasoning_effort") or out.get("reasoning.effort"),
+        "service_tier_override": out.get("service_tier"),
+        "fast_mode_override": out.get("features.fast_mode") or out.get("fast_mode"),
+    }
+
+def main():
+    args = sys.argv[1:]
+    invocation_id = str(uuid.uuid4())
+    command = args[0] if args else None
+    overrides = parse_overrides(args)
+    conn = ensure_db()
+    conn.execute(
+        "insert into cli_invocations(invocation_id,started_at,cwd,argv_json,command,model_override,reasoning_effort_override,service_tier_override,fast_mode_override) values(?,?,?,?,?,?,?,?,?)",
+        (invocation_id, iso(), os.getcwd(), json.dumps(args, separators=(",", ":")), command, overrides["model_override"], overrides["reasoning_effort_override"], overrides["service_tier_override"], overrides["fast_mode_override"]),
+    )
+    conn.commit()
+
+    capture_json = command == "exec" and "--json" in args
+    thread_id = None
+    usage = None
+    if capture_json:
+        proc = subprocess.Popen([REAL_CODEX, *args], stdin=sys.stdin, stdout=subprocess.PIPE, stderr=None, text=True, bufsize=1)
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if obj.get("type") == "thread.started":
+                thread_id = obj.get("thread_id")
+            elif obj.get("type") == "turn.completed":
+                usage = obj.get("usage")
+        code = proc.wait()
+    else:
+        code = subprocess.call([REAL_CODEX, *args])
+
+    conn.execute(
+        "update cli_invocations set ended_at=?, thread_id=?, usage_json=?, exit_code=? where invocation_id=?",
+        (iso(), thread_id, json.dumps(usage, separators=(",", ":")) if usage is not None else None, code, invocation_id),
+    )
+    conn.commit()
+    return code
+
+if __name__ == "__main__":
+    raise SystemExit(main())

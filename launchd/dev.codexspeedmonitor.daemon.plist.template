@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__BIN_DIR__/codex_telemetry_daemon.py</string>
+    <string>--db</string>
+    <string>__DB_PATH__</string>
+    <string>--log-db</string>
+    <string>__LOG_DB__</string>
+    <string>--state-db</string>
+    <string>__STATE_DB__</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CODEX_HOME</key>
+    <string>__CODEX_HOME__</string>
+    <key>CODEX_TELEMETRY_DB</key>
+    <string>__DB_PATH__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/daemon.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/daemon.err.log</string>
+  <key>WorkingDirectory</key>
+  <string>__DATA_DIR__</string>
+</dict>
+</plist>
