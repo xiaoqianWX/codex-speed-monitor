@@ -42,8 +42,9 @@ final class TelemetryStore: ObservableObject {
     private var loading = false
     private var activeScope = "today"
     private var pendingScope: String?
-    private var refreshTimer: Timer?
     private var cache: [String: TelemetryPayload] = [:]
+    private var lastLoadedAt: [String: Date] = [:]
+    private let minimumRefreshInterval: TimeInterval = 45
 
     private let dayFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -60,16 +61,7 @@ final class TelemetryStore: ObservableObject {
     }()
 
     init() {
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.refresh(scope: self.activeScope)
-        }
-        refreshTimer?.tolerance = 10
         refresh(scope: "today", force: true)
-    }
-
-    deinit {
-        refreshTimer?.invalidate()
     }
 
     func setScope(_ rawScope: String) {
@@ -89,6 +81,9 @@ final class TelemetryStore: ObservableObject {
                 self.pendingScope = scope
                 return
             }
+            if !force, let last = self.lastLoadedAt[scope], Date().timeIntervalSince(last) < self.minimumRefreshInterval {
+                return
+            }
             self.loading = true
             DispatchQueue.main.async { self.refreshing = true }
             defer {
@@ -101,6 +96,7 @@ final class TelemetryStore: ObservableObject {
             defer { sqlite3_close(db) }
 
             let payload = self.loadPayload(db, scope: scope)
+            self.lastLoadedAt[scope] = Date()
 
             DispatchQueue.main.async {
                 self.cache[scope] = payload

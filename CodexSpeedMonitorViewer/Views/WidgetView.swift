@@ -4,7 +4,7 @@ import AppKit
 struct WidgetView: View {
     @ObservedObject var store: TelemetryStore
     @AppStorage("telemetryTimeScope") private var timeScope = "today"
-    private let timer = Timer.publish(every: 8, on: .main, in: .common).autoconnect()
+    private let timer = Timer.publish(every: 45, tolerance: 15, on: .main, in: .common).autoconnect()
 
     var chartPoints: [MiniDay] {
         if timeScope == "today" {

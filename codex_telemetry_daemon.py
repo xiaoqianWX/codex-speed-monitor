@@ -924,7 +924,7 @@ def main():
     ap.add_argument("--db", default=str(DEFAULT_DB))
     ap.add_argument("--log-db", default=str(DEFAULT_LOG_DB))
     ap.add_argument("--state-db", default=str(DEFAULT_STATE_DB))
-    ap.add_argument("--interval", type=float, default=2.0)
+    ap.add_argument("--interval", type=float, default=15.0)
     ap.add_argument("--heartbeat-interval", type=float, default=30.0)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()

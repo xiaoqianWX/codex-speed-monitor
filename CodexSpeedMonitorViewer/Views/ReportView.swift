@@ -6,7 +6,7 @@ struct ReportView: View {
     @ObservedObject var store: TelemetryStore
     @AppStorage("telemetryTimeScope") private var timeScope = "today"
     @State private var exportMessage = ""
-    private let timer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
+    private let timer = Timer.publish(every: 60, tolerance: 20, on: .main, in: .common).autoconnect()
 
     var rangePoints: [MiniDay] {
         if timeScope == "today" {

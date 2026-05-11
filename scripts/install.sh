@@ -10,6 +10,7 @@ LOG_DIR="${DATA_DIR}/logs"
 DB_PATH="${CODEX_TELEMETRY_DB:-${DATA_DIR}/codex_telemetry.sqlite}"
 LOG_DB="${CODEX_TELEMETRY_LOG_DB:-${CODEX_HOME}/logs_2.sqlite}"
 STATE_DB="${CODEX_TELEMETRY_STATE_DB:-${CODEX_HOME}/state_5.sqlite}"
+INTERVAL="${CODEX_TELEMETRY_INTERVAL:-15}"
 PLIST_PATH="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 APP_TARGET="${CODEX_TELEMETRY_APP_TARGET:-${HOME}/Applications/CodexSpeedMonitor.app}"
 INSTALL_APP=1
@@ -94,6 +95,8 @@ cat > "${PLIST_PATH}" <<PLIST
     <string>${LOG_DB}</string>
     <string>--state-db</string>
     <string>${STATE_DB}</string>
+    <string>--interval</string>
+    <string>${INTERVAL}</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
