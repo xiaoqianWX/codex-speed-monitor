@@ -28,6 +28,12 @@ private struct TelemetryPayload {
     let recent: [RecentTurn]
 }
 
+private struct QuerySource {
+    let usageTable: String
+    let speedTable: String
+    let cached: Bool
+}
+
 final class TelemetryStore: ObservableObject {
     @Published var snapshot = Snapshot()
     @Published var days: [MiniDay] = []
@@ -115,16 +121,17 @@ final class TelemetryStore: ObservableObject {
     }
 
     private func loadPayload(_ db: OpaquePointer?, scope: String) -> TelemetryPayload {
-        let nextSnapshot = loadSnapshot(db, scope: scope)
+        let source = querySource(db)
+        let nextSnapshot = loadSnapshot(db, source: source, scope: scope)
         let cutoff = nextSnapshot.cutover
         return TelemetryPayload(
             snapshot: nextSnapshot,
-            days: loadDays(db, cutoff: cutoff, scope: scope),
-            hours: loadHours(db, cutoff: cutoff, scope: scope),
-            modes: loadModes(db, cutoff: cutoff, scope: scope),
-            models: loadModels(db, cutoff: cutoff, scope: scope),
-            reasoning: loadReasoning(db, cutoff: cutoff, scope: scope),
-            recent: loadRecent(db, cutoff: cutoff, scope: scope)
+            days: loadDays(db, source: source, cutoff: cutoff, scope: scope),
+            hours: loadHours(db, source: source, cutoff: cutoff, scope: scope),
+            modes: loadModes(db, source: source, cutoff: cutoff, scope: scope),
+            models: loadModels(db, source: source, cutoff: cutoff, scope: scope),
+            reasoning: loadReasoning(db, source: source, cutoff: cutoff, scope: scope),
+            recent: loadRecent(db, source: source, cutoff: cutoff, scope: scope)
         )
     }
 
@@ -141,6 +148,19 @@ final class TelemetryStore: ObservableObject {
     private func text(_ stmt: OpaquePointer?, _ index: Int32) -> String {
         guard let c = sqlite3_column_text(stmt, index) else { return "" }
         return String(cString: c)
+    }
+
+    private func querySource(_ db: OpaquePointer?) -> QuerySource {
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "select 1 from sqlite_master where type='table' and name='trusted_turn_cache' limit 1", -1, &stmt, nil) == SQLITE_OK {
+            defer { sqlite3_finalize(stmt) }
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                return QuerySource(usageTable: "trusted_turn_cache", speedTable: "trusted_turn_cache", cached: true)
+            }
+        } else {
+            sqlite3_finalize(stmt)
+        }
+        return QuerySource(usageTable: "trusted_codex_turns", speedTable: "trusted_codex_speed_turns", cached: false)
     }
 
     private func cutoff(_ db: OpaquePointer?) -> String {
@@ -170,8 +190,11 @@ final class TelemetryStore: ObservableObject {
         "completed_at is not null and \(rangePredicate(scope))"
     }
 
-    private func speedPredicate(scope: String) -> String {
-        "completed_at is not null and \(rangePredicate(scope))"
+    private func speedPredicate(source: QuerySource, scope: String) -> String {
+        if source.cached {
+            return "speed_eligible = 1 and completed_at is not null and \(rangePredicate(scope))"
+        }
+        return "completed_at is not null and \(rangePredicate(scope))"
     }
 
     private func modeSQL() -> String {
@@ -187,8 +210,9 @@ final class TelemetryStore: ObservableObject {
         """
     }
 
-    private func laneSQL() -> String {
-        """
+    private func laneSQL(source: QuerySource) -> String {
+        if source.cached { return "lane" }
+        return """
         case
           when lower(\(modeSQL())) like '%fast%' then 'Fast'
           when lower(\(modeSQL())) = 'standard' then 'Standard'
@@ -207,18 +231,18 @@ final class TelemetryStore: ObservableObject {
         return "strftime('%Y-%m-%d %H:00', completed_at, 'localtime')"
     }
 
-    private func loadSnapshot(_ db: OpaquePointer?, scope: String) -> Snapshot {
+    private func loadSnapshot(_ db: OpaquePointer?, source: QuerySource, scope: String) -> Snapshot {
         var s = Snapshot()
         s.cutover = cutoff(db)
         var stmt: OpaquePointer?
         let trusted = trustedPredicate(cutover: s.cutover, scope: scope)
-        let speedTrusted = speedPredicate(scope: scope)
+        let speedTrusted = speedPredicate(source: source, scope: scope)
 
         let summarySQL = """
         select
-          (select count(*) from trusted_codex_turns where \(trusted)),
-          (select coalesce(sum(total_tokens),0) from trusted_codex_turns where \(trusted)),
-          (select coalesce(avg(output_tokens_per_second),0) from trusted_codex_speed_turns where \(speedTrusted))
+          (select count(*) from \(source.usageTable) where \(trusted)),
+          (select coalesce(sum(total_tokens),0) from \(source.usageTable) where \(trusted)),
+          (select coalesce(avg(output_tokens_per_second),0) from \(source.speedTable) where \(speedTrusted))
         """
         if sqlite3_prepare_v2(db, summarySQL, -1, &stmt, nil) == SQLITE_OK, sqlite3_step(stmt) == SQLITE_ROW {
             s.todayTurns = Int(sqlite3_column_int(stmt, 0))
@@ -230,7 +254,7 @@ final class TelemetryStore: ObservableObject {
 
         let latestSQL = """
         select coalesce(model,'-'), \(modeSQL()), coalesce(output_tokens_per_second,0)
-        from trusted_codex_speed_turns
+        from \(source.speedTable)
         where \(speedTrusted)
         order by completed_at desc
         limit 1
@@ -253,16 +277,16 @@ final class TelemetryStore: ObservableObject {
         return s
     }
 
-    private func loadHours(_ db: OpaquePointer?, cutoff: String, scope: String) -> [MiniDay] {
-        let trusted = speedPredicate(scope: scope)
-        let bucket = speedBucketSQL(scope: scope)
+    private func loadHours(_ db: OpaquePointer?, source: QuerySource, cutoff: String, scope: String) -> [MiniDay] {
+        let trusted = speedPredicate(source: source, scope: scope)
+        let bucket = source.cached ? (normalizedScope(scope) == "today" ? "five_min_bucket" : "hour_bucket") : speedBucketSQL(scope: scope)
         let sql = """
         with turns as (
           select \(bucket) as bucket,
-                 \(laneSQL()) as lane,
+                 \(laneSQL(source: source)) as lane,
                  output_tokens_per_second,
                  total_tokens
-          from trusted_codex_speed_turns
+          from \(source.speedTable)
           where \(trusted)
         )
         select bucket, lane, coalesce(avg(output_tokens_per_second),0), coalesce(sum(total_tokens),0)
@@ -274,15 +298,16 @@ final class TelemetryStore: ObservableObject {
         return loadSeries(db, sql: sql, formatter: hourFormatter)
     }
 
-    private func loadDays(_ db: OpaquePointer?, cutoff: String, scope: String) -> [MiniDay] {
-        let trusted = speedPredicate(scope: scope)
+    private func loadDays(_ db: OpaquePointer?, source: QuerySource, cutoff: String, scope: String) -> [MiniDay] {
+        let trusted = speedPredicate(source: source, scope: scope)
+        let bucket = source.cached ? "day_bucket" : "date(completed_at, 'localtime')"
         let sql = """
         with turns as (
-          select date(completed_at, 'localtime') as bucket,
-                 \(laneSQL()) as lane,
+          select \(bucket) as bucket,
+                 \(laneSQL(source: source)) as lane,
                  output_tokens_per_second,
                  total_tokens
-          from trusted_codex_speed_turns
+          from \(source.speedTable)
           where \(trusted)
         )
         select bucket, lane, coalesce(avg(output_tokens_per_second),0), coalesce(sum(total_tokens),0)
@@ -306,19 +331,19 @@ final class TelemetryStore: ObservableObject {
         return rows
     }
 
-    private func loadModes(_ db: OpaquePointer?, cutoff: String, scope: String) -> [ModeRow] {
+    private func loadModes(_ db: OpaquePointer?, source: QuerySource, cutoff: String, scope: String) -> [ModeRow] {
         let trusted = trustedPredicate(cutover: cutoff, scope: scope)
-        let speedTrusted = speedPredicate(scope: scope)
+        let speedTrusted = speedPredicate(source: source, scope: scope)
         let sql = """
         with usage as (
           select \(modeSQL()) as mode, coalesce(sum(total_tokens),0) as tokens, count(*) as turns
-          from trusted_codex_turns
+          from \(source.usageTable)
           where \(trusted)
           group by 1
         ),
         speed as (
           select \(modeSQL()) as mode, coalesce(avg(output_tokens_per_second),0) as tps
-          from trusted_codex_speed_turns
+          from \(source.speedTable)
           where \(speedTrusted)
           group by 1
         )
@@ -337,19 +362,19 @@ final class TelemetryStore: ObservableObject {
         return rows
     }
 
-    private func loadModels(_ db: OpaquePointer?, cutoff: String, scope: String) -> [ModelRow] {
+    private func loadModels(_ db: OpaquePointer?, source: QuerySource, cutoff: String, scope: String) -> [ModelRow] {
         let trusted = trustedPredicate(cutover: cutoff, scope: scope)
         let sql = """
         with usage as (
           select coalesce(model,'unknown') as model, \(modeSQL()) as mode, coalesce(reasoning_effort,'unspecified') as reasoning, coalesce(sum(total_tokens),0) as tokens, count(*) as turns
-          from trusted_codex_turns
+          from \(source.usageTable)
           where \(trusted)
           group by 1, 2, 3
         ),
         speed as (
           select coalesce(model,'unknown') as model, \(modeSQL()) as mode, coalesce(reasoning_effort,'unspecified') as reasoning, coalesce(avg(output_tokens_per_second),0) as tps
-          from trusted_codex_speed_turns
-          where \(speedPredicate(scope: scope))
+          from \(source.speedTable)
+          where \(speedPredicate(source: source, scope: scope))
           group by 1, 2, 3
         )
         select usage.model, usage.mode, usage.reasoning, usage.tokens, usage.turns, coalesce(speed.tps,0)
@@ -367,19 +392,19 @@ final class TelemetryStore: ObservableObject {
         return rows
     }
 
-    private func loadReasoning(_ db: OpaquePointer?, cutoff: String, scope: String) -> [ReasoningRow] {
+    private func loadReasoning(_ db: OpaquePointer?, source: QuerySource, cutoff: String, scope: String) -> [ReasoningRow] {
         let trusted = trustedPredicate(cutover: cutoff, scope: scope)
         let sql = """
         with usage as (
           select coalesce(reasoning_effort,'unspecified') as level, coalesce(sum(total_tokens),0) as tokens, count(*) as turns
-          from trusted_codex_turns
+          from \(source.usageTable)
           where \(trusted)
           group by 1
         ),
         speed as (
           select coalesce(reasoning_effort,'unspecified') as level, coalesce(avg(output_tokens_per_second),0) as tps
-          from trusted_codex_speed_turns
-          where \(speedPredicate(scope: scope))
+          from \(source.speedTable)
+          where \(speedPredicate(source: source, scope: scope))
           group by 1
         )
         select usage.level, usage.tokens, usage.turns, coalesce(speed.tps,0)
@@ -397,11 +422,11 @@ final class TelemetryStore: ObservableObject {
         return rows
     }
 
-    private func loadRecent(_ db: OpaquePointer?, cutoff: String, scope: String) -> [RecentTurn] {
-        let trusted = speedPredicate(scope: scope)
+    private func loadRecent(_ db: OpaquePointer?, source: QuerySource, cutoff: String, scope: String) -> [RecentTurn] {
+        let trusted = speedPredicate(source: source, scope: scope)
         let sql = """
         select coalesce(completed_at,''), coalesce(model,'unknown'), \(modeSQL()), coalesce(reasoning_effort,'unspecified'), coalesce(total_tokens,0), coalesce(output_tokens_per_second,0)
-        from trusted_codex_speed_turns
+        from \(source.speedTable)
         where \(trusted)
         order by completed_at desc
         limit 10

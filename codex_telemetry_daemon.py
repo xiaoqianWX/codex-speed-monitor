@@ -238,6 +238,46 @@ create table if not exists turn_observations (
 );
 create index if not exists idx_turn_observations_time on turn_observations(completed_at);
 create index if not exists idx_turn_observations_thread on turn_observations(thread_id, turn_id);
+create table if not exists trusted_turn_cache (
+  source text not null,
+  source_id text not null,
+  observed_at text not null,
+  surface text not null,
+  thread_id text,
+  turn_id text,
+  response_id text,
+  model text,
+  reasoning_effort text,
+  service_tier_requested text,
+  service_tier_served text,
+  mode text,
+  input_tokens integer,
+  cached_input_tokens integer,
+  output_tokens integer,
+  reasoning_tokens integer,
+  total_tokens integer,
+  started_at text,
+  completed_at text,
+  ttft_ms real,
+  duration_ms real,
+  output_tokens_per_second real,
+  non_reasoning_tokens_per_second real,
+  confidence text not null,
+  raw_json text,
+  speed_eligible integer not null,
+  lane text not null,
+  day_bucket text,
+  hour_bucket text,
+  five_min_bucket text,
+  cache_updated_at text not null,
+  primary key (source, source_id)
+);
+create index if not exists idx_trusted_turn_cache_completed on trusted_turn_cache(completed_at);
+create index if not exists idx_trusted_turn_cache_speed_completed on trusted_turn_cache(speed_eligible, completed_at);
+create index if not exists idx_trusted_turn_cache_day_lane on trusted_turn_cache(day_bucket, lane);
+create index if not exists idx_trusted_turn_cache_hour_lane on trusted_turn_cache(hour_bucket, lane);
+create index if not exists idx_trusted_turn_cache_mode on trusted_turn_cache(mode, completed_at);
+create index if not exists idx_trusted_turn_cache_model on trusted_turn_cache(model, mode, reasoning_effort);
 create view if not exists codex_turns as
 with ranked as (
   select o.*,
@@ -806,6 +846,65 @@ def refresh_turn_observations(conn, full=False):
     return inserted
 
 
+def rebuild_trusted_turn_cache(conn):
+    updated_at = now_iso()
+    conn.execute("delete from trusted_turn_cache")
+    conn.execute(
+        """
+        insert into trusted_turn_cache(
+          source, source_id, observed_at, surface, thread_id, turn_id, response_id,
+          model, reasoning_effort, service_tier_requested, service_tier_served, mode,
+          input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, total_tokens,
+          started_at, completed_at, ttft_ms, duration_ms, output_tokens_per_second,
+          non_reasoning_tokens_per_second, confidence, raw_json, speed_eligible, lane,
+          day_bucket, hour_bucket, five_min_bucket, cache_updated_at
+        )
+        select
+          c.source, c.source_id, c.observed_at, c.surface, c.thread_id, c.turn_id, c.response_id,
+          c.model, c.reasoning_effort, c.service_tier_requested, c.service_tier_served, c.mode,
+          c.input_tokens, c.cached_input_tokens, c.output_tokens, c.reasoning_tokens, c.total_tokens,
+          c.started_at, c.completed_at, c.ttft_ms, c.duration_ms, c.output_tokens_per_second,
+          c.non_reasoning_tokens_per_second, c.confidence, c.raw_json,
+          case when c.source = 'app_response'
+                 and c.output_tokens_per_second is not null
+                 and c.output_tokens_per_second >= 0
+                 and c.duration_ms is not null
+                 and c.duration_ms >= 5000
+                 and c.output_tokens is not null
+                 and c.output_tokens >= 100
+                 and not exists (
+                   select 1
+                   from json_each(case when json_valid(c.raw_json) then c.raw_json else '{"response":{"tool_usage":{}}}' end, '$.response.tool_usage') tool
+                   where coalesce(json_extract(tool.value, '$.total_tokens'), 0) > 0
+                      or coalesce(json_extract(tool.value, '$.input_tokens'), 0) > 0
+                      or coalesce(json_extract(tool.value, '$.output_tokens'), 0) > 0
+                      or coalesce(json_extract(tool.value, '$.input_tokens_details.image_tokens'), 0) > 0
+                      or coalesce(json_extract(tool.value, '$.input_tokens_details.text_tokens'), 0) > 0
+                      or coalesce(json_extract(tool.value, '$.output_tokens_details.image_tokens'), 0) > 0
+                      or coalesce(json_extract(tool.value, '$.output_tokens_details.text_tokens'), 0) > 0
+                      or coalesce(json_extract(tool.value, '$.num_requests'), 0) > 0
+                 )
+               then 1 else 0 end as speed_eligible,
+          case
+            when lower(coalesce(c.service_tier_served,'')) in ('fast','priority') then 'Fast'
+            when lower(coalesce(c.service_tier_requested,'')) in ('fast','priority') then 'Fast'
+            when lower(coalesce(c.mode,'')) like '%fast%' then 'Fast'
+            when lower(coalesce(c.mode,'')) in ('default','standard') then 'Standard'
+            else 'Other'
+          end as lane,
+          date(c.completed_at, 'localtime') as day_bucket,
+          strftime('%Y-%m-%d %H:00', c.completed_at, 'localtime') as hour_bucket,
+          strftime('%Y-%m-%d %H:', c.completed_at, 'localtime') ||
+            printf('%02d', (cast(strftime('%M', c.completed_at, 'localtime') as integer) / 5) * 5) as five_min_bucket,
+          ?
+        from trusted_codex_turns c
+        """,
+        (updated_at,),
+    )
+    set_state(conn, "trusted_turn_cache:rebuilt_at", updated_at)
+    return conn.execute("select count(*) from trusted_turn_cache").fetchone()[0]
+
+
 def write_heartbeat(conn, source_key=None):
     cursor = int(get_state(conn, source_key, 0) or 0) if source_key else None
     counts = conn.execute(
@@ -838,7 +937,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with self.server.lock:
                 conn = connect(self.server.db_path)
                 row = conn.execute("select value, updated_at from capture_state where key='daemon:last_heartbeat'").fetchone()
-                counts = conn.execute("select (select count(*) from otlp_requests), (select count(*) from app_response_events), (select count(*) from codex_turns)").fetchone()
+                counts = conn.execute("select (select count(*) from otlp_requests), (select count(*) from app_response_events), (select count(*) from trusted_turn_cache)").fetchone()
                 conn.close()
             self._json(200, {"ok": True, "time": now_iso(), "heartbeat": row[0] if row else None, "otlp_requests": counts[0], "app_response_events": counts[1], "turns": counts[2]})
         else:
@@ -869,7 +968,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             request_id = cur.lastrowid
             if text and json_valid:
                 parse_otlp(conn, request_id, self.path, text)
-                refresh_turn_observations(conn)
+                if refresh_turn_observations(conn):
+                    rebuild_trusted_turn_cache(conn)
             write_heartbeat(conn)
             conn.commit()
             conn.close()
@@ -893,7 +993,9 @@ def poll_loop(db_path, log_db, state_db, interval, heartbeat_interval, verbose, 
             conn = connect(db_path)
             imported = ingest_app_logs(conn, log_db)
             ingest_thread_metadata(conn, state_db)
-            refresh_turn_observations(conn)
+            changed = refresh_turn_observations(conn)
+            if changed or conn.execute("select count(*) from trusted_turn_cache").fetchone()[0] == 0:
+                rebuild_trusted_turn_cache(conn)
             now = time.time()
             if now - last_snapshot > 300:
                 snapshot_config(conn)
