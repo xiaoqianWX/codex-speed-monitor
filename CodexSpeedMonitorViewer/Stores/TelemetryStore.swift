@@ -41,9 +41,9 @@ final class TelemetryStore: ObservableObject {
     private let queue = DispatchQueue(label: "codex.telemetry.viewer.store", qos: .utility)
     private var loading = false
     private var activeScope = "today"
+    private var pendingScope: String?
     private var refreshTimer: Timer?
     private var cache: [String: TelemetryPayload] = [:]
-    private let availableScopes = ["today", "7d", "14d"]
 
     private let dayFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -84,9 +84,11 @@ final class TelemetryStore: ObservableObject {
     func refresh(scope rawScope: String = "today", force: Bool = false) {
         let scope = normalizedScope(rawScope)
         activeScope = scope
-        let scopesToLoad = force || cache.count < availableScopes.count ? availableScopes : [scope]
         queue.async {
-            if self.loading && !force { return }
+            if self.loading && !force {
+                self.pendingScope = scope
+                return
+            }
             self.loading = true
             DispatchQueue.main.async { self.refreshing = true }
             defer {
@@ -98,18 +100,20 @@ final class TelemetryStore: ObservableObject {
             guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else { return }
             defer { sqlite3_close(db) }
 
-            var loaded: [String: TelemetryPayload] = [:]
-            for targetScope in scopesToLoad {
-                loaded[targetScope] = self.loadPayload(db, scope: targetScope)
-            }
+            let payload = self.loadPayload(db, scope: scope)
 
             DispatchQueue.main.async {
-                for (key, payload) in loaded {
-                    self.cache[key] = payload
-                }
+                self.cache[scope] = payload
                 if let active = self.cache[self.activeScope] {
                     self.apply(active)
                 }
+            }
+
+            if let pending = self.pendingScope, pending != scope {
+                self.pendingScope = nil
+                self.refresh(scope: pending, force: true)
+            } else {
+                self.pendingScope = nil
             }
         }
     }

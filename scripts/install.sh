@@ -15,6 +15,21 @@ APP_TARGET="${CODEX_TELEMETRY_APP_TARGET:-${HOME}/Applications/CodexSpeedMonitor
 INSTALL_APP=1
 CONFIGURE_CODEX=1
 
+stop_viewer_app() {
+  local app_binary="${APP_TARGET}/Contents/MacOS/CodexSpeedMonitor"
+
+  /usr/bin/osascript -e 'tell application id "dev.codexspeedmonitor.viewer" to quit' >/dev/null 2>&1 || true
+
+  if pgrep -f "${app_binary}" >/dev/null 2>&1; then
+    pkill -TERM -f "${app_binary}" >/dev/null 2>&1 || true
+    sleep 1
+  fi
+
+  if pgrep -f "${app_binary}" >/dev/null 2>&1; then
+    pkill -KILL -f "${app_binary}" >/dev/null 2>&1 || true
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-app)
@@ -129,6 +144,7 @@ launchctl kickstart -k "gui/$(id -u)/${LABEL}"
 if [[ "${INSTALL_APP}" -eq 1 ]]; then
   if "${ROOT}/scripts/build_app.sh" >/tmp/codex-speed-monitor-build-path.txt; then
     mkdir -p "$(dirname "${APP_TARGET}")"
+    stop_viewer_app
     rm -rf "${APP_TARGET}"
     cp -R "$(cat /tmp/codex-speed-monitor-build-path.txt)" "${APP_TARGET}"
     open "${APP_TARGET}" || true

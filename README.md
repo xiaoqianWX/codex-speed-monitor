@@ -41,6 +41,8 @@ The installer starts the background collector, builds the menu-bar app, and open
 
 After installing, restart Codex if it was already open, then send one Codex message. The app will start filling in from new responses.
 
+To update an existing install, pull the latest code and rerun `./scripts/install.sh`. The installer relaunches the menu-bar app so the latest viewer code is used immediately.
+
 ## Open the app
 
 The app lives in your menu bar, not the Dock.
