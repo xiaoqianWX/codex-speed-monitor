@@ -82,6 +82,7 @@ struct ScopeControl: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                         .background(scope == option.0 ? .white.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(.plain)
             }
@@ -198,16 +199,18 @@ struct ModeSpeedRow: View {
     var widthRatio: Double { turns == 0 ? 0 : min(max(tps / maxTPS, 0), 1) }
 
     var body: some View {
-        VStack(spacing: 7) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(title)
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                     .foregroundStyle(accent.opacity(0.95))
                     .frame(width: 76, alignment: .leading)
                 if turns == 0 {
+                    Spacer(minLength: 8)
                     Text("No data")
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.34))
+                        .lineLimit(1)
                 } else {
                     Text(String(format: "%.1f", tps))
                         .font(.system(size: 24, weight: .semibold, design: .rounded))
@@ -224,6 +227,7 @@ struct ModeSpeedRow: View {
                         .minimumScaleFactor(0.70)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule().fill(.white.opacity(0.075))

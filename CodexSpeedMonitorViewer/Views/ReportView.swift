@@ -2,6 +2,9 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+private let reportMinimumLayoutSize = CGSize(width: 1000, height: 700)
+private let reportMinimumWindowSize = CGSize(width: 720, height: 520)
+
 struct ReportView: View {
     @ObservedObject var store: TelemetryStore
     @AppStorage("telemetryTimeScope") private var timeScope = "today"
@@ -18,36 +21,46 @@ struct ReportView: View {
     var body: some View {
         ZStack {
             reportBackground.ignoresSafeArea()
-            VStack(spacing: 16) {
-                ReportHeader(store: store, scope: $timeScope, exportMessage: exportMessage) { exportCSV() }
-                HStack(spacing: 14) {
-                    ReportRangeSummary(snapshot: store.snapshot, scope: timeScope)
-                    ReportModeSummary(modes: store.modes)
+            GeometryReader { proxy in
+                ScrollView([.horizontal, .vertical]) {
+                    reportContent
+                        .padding(22)
+                        .frame(width: max(proxy.size.width, reportMinimumLayoutSize.width), alignment: .top)
+                        .frame(minHeight: max(proxy.size.height, reportMinimumLayoutSize.height), alignment: .top)
                 }
-                ReportPanel(title: "Speed over time", subtitle: scopeSubtitle(timeScope)) {
-                    ReportLegend()
-                    ReportChart(points: rangePoints, scope: timeScope)
-                        .frame(height: 230)
-                }
-                HStack(spacing: 14) {
-                    ReportPanel(title: "Reasoning", subtitle: "effort levels") {
-                        ReportReasoningRows(reasoning: store.reasoning)
-                    }
-                    ReportPanel(title: "Models", subtitle: scopeSubtitle(timeScope)) {
-                        ReportModelRows(models: store.models)
-                    }
-                    ReportPanel(title: "Recent", subtitle: scopeSubtitle(timeScope)) {
-                        ReportRecentRows(recent: store.recent)
-                    }
-                }
-                .frame(height: 230)
             }
-            .padding(22)
         }
-        .frame(minWidth: 1000, minHeight: 700)
+        .frame(minWidth: reportMinimumWindowSize.width, minHeight: reportMinimumWindowSize.height)
         .onAppear { store.setScope(timeScope) }
         .onChange(of: timeScope) { store.setScope(timeScope) }
         .onReceive(timer) { _ in store.refresh(scope: timeScope) }
+    }
+
+    private var reportContent: some View {
+        VStack(spacing: 16) {
+            ReportHeader(store: store, scope: $timeScope, exportMessage: exportMessage) { exportCSV() }
+            HStack(spacing: 14) {
+                ReportRangeSummary(snapshot: store.snapshot, scope: timeScope)
+                ReportModeSummary(modes: store.modes)
+            }
+            ReportPanel(title: "Speed over time", subtitle: scopeSubtitle(timeScope)) {
+                ReportLegend()
+                ReportChart(points: rangePoints, scope: timeScope)
+                    .frame(height: 230)
+            }
+            HStack(spacing: 14) {
+                ReportPanel(title: "Reasoning", subtitle: "effort levels") {
+                    ReportReasoningRows(reasoning: store.reasoning)
+                }
+                ReportPanel(title: "Models", subtitle: scopeSubtitle(timeScope)) {
+                    ReportModelRows(models: store.models)
+                }
+                ReportPanel(title: "Recent", subtitle: scopeSubtitle(timeScope)) {
+                    ReportRecentRows(recent: store.recent)
+                }
+            }
+            .frame(height: 230)
+        }
     }
 
     private func exportCSV() {
@@ -245,6 +258,8 @@ struct ReportLegend: View {
 struct ReportChart: View {
     let points: [MiniDay]
     let scope: String
+    @State private var hover: ReportChartHover?
+
     var grouped: [(String, [MiniDay])] {
         Dictionary(grouping: points, by: { $0.lane })
             .map { ($0.key, $0.value.sorted { $0.date < $1.date }) }
@@ -252,55 +267,167 @@ struct ReportChart: View {
     }
 
     var body: some View {
-        Canvas { context, size in
-            guard !points.isEmpty else {
-                context.draw(Text("waiting for data").font(.caption).foregroundStyle(.white.opacity(0.35)), at: CGPoint(x: size.width / 2, y: size.height / 2))
-                return
-            }
-            let dates = points.map(\.date).sorted()
-            let rawMinDate = dates.first ?? Date()
-            let rawMaxDate = dates.last ?? rawMinDate
-            let span = rawMaxDate.timeIntervalSince(rawMinDate)
-            let minWindow = scope == "today" ? 3600.0 : 86400.0
-            let pad = scope == "today" ? 300.0 : 43200.0
-            let minDate = scope == "today" && span < minWindow ? rawMaxDate.addingTimeInterval(-minWindow) : rawMinDate.addingTimeInterval(-pad)
-            let maxDate = scope == "today" && span < minWindow ? rawMaxDate.addingTimeInterval(pad) : rawMaxDate.addingTimeInterval(pad)
-            let maxY = niceCeiling(max(points.map(\.tps).max() ?? 1, 1) * 1.08)
-            let plot = CGRect(x: 12, y: 12, width: size.width - 24, height: size.height - 36)
-            var grid = Path()
-            for i in 0...3 {
-                let y = plot.maxY - plot.height * CGFloat(i) / 3
-                grid.move(to: CGPoint(x: plot.minX, y: y))
-                grid.addLine(to: CGPoint(x: plot.maxX, y: y))
-            }
-            context.stroke(grid, with: .color(.white.opacity(0.075)), lineWidth: 1)
-            func x(_ date: Date) -> CGFloat {
-                let xSpan = max(maxDate.timeIntervalSince(minDate), minWindow)
-                return plot.minX + plot.width * CGFloat(date.timeIntervalSince(minDate) / xSpan)
-            }
-            func y(_ value: Double) -> CGFloat { plot.maxY - plot.height * CGFloat(value / maxY) }
-            for (lane, rows) in grouped {
-                if rows.count >= 2 {
-                    var path = Path()
-                    for (index, row) in rows.enumerated() {
-                        let point = CGPoint(x: x(row.date), y: y(row.tps))
-                        if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                Canvas { context, size in
+                    drawChart(context: &context, size: size)
+                }
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            hover = nearestPoint(to: location, in: proxy.size)
+                        case .ended:
+                            hover = nil
+                        }
                     }
-                    let isFast = lane.lowercased().contains("fast")
-                    context.stroke(path, with: .color(tone(for: lane)), style: StrokeStyle(lineWidth: isFast ? 3.0 : 2.0, lineCap: .round, lineJoin: .round, dash: isFast ? [] : [5, 5]))
-                }
-                let dots = rows.count <= 5 ? rows : Array(rows.suffix(3))
-                for row in dots {
-                    let point = CGPoint(x: x(row.date), y: y(row.tps))
-                    context.fill(Path(ellipseIn: CGRect(x: point.x - 2.8, y: point.y - 2.8, width: 5.6, height: 5.6)), with: .color(tone(for: lane)))
+                if let hover {
+                    ReportChartTooltip(hover: hover, scope: scope)
+                        .fixedSize()
+                        .position(tooltipPosition(for: hover, in: proxy.size))
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
                 }
             }
-            context.draw(Text(String(format: "%.0f t/s", maxY)).font(.caption2).foregroundStyle(.white.opacity(0.30)), at: CGPoint(x: plot.maxX, y: plot.minY), anchor: .trailing)
-            let leftLabel = scope == "today" ? shortTime(minDate) : shortAxis(minDate)
-            let rightLabel = scope == "today" ? shortTime(maxDate) : shortAxis(maxDate)
-            context.draw(Text(leftLabel).font(.caption2).foregroundStyle(.white.opacity(0.32)), at: CGPoint(x: plot.minX, y: size.height - 8), anchor: .leading)
-            context.draw(Text(rightLabel).font(.caption2).foregroundStyle(.white.opacity(0.32)), at: CGPoint(x: plot.maxX, y: size.height - 8), anchor: .trailing)
         }
+    }
+
+    private func drawChart(context: inout GraphicsContext, size: CGSize) {
+        guard let layout = makeChartLayout(size: size) else {
+            context.draw(Text("waiting for data").font(.caption).foregroundStyle(.white.opacity(0.35)), at: CGPoint(x: size.width / 2, y: size.height / 2))
+            return
+        }
+
+        var grid = Path()
+        for i in 0...3 {
+            let y = layout.plot.maxY - layout.plot.height * CGFloat(i) / 3
+            grid.move(to: CGPoint(x: layout.plot.minX, y: y))
+            grid.addLine(to: CGPoint(x: layout.plot.maxX, y: y))
+        }
+        context.stroke(grid, with: .color(.white.opacity(0.075)), lineWidth: 1)
+
+        for (lane, rows) in grouped {
+            if rows.count >= 2 {
+                var path = Path()
+                for (index, row) in rows.enumerated() {
+                    let point = layout.point(for: row)
+                    if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+                }
+                let isFast = lane.lowercased().contains("fast")
+                context.stroke(path, with: .color(tone(for: lane)), style: StrokeStyle(lineWidth: isFast ? 3.0 : 2.0, lineCap: .round, lineJoin: .round, dash: isFast ? [] : [5, 5]))
+            }
+            for row in rows {
+                let point = layout.point(for: row)
+                context.fill(Path(ellipseIn: CGRect(x: point.x - 2.8, y: point.y - 2.8, width: 5.6, height: 5.6)), with: .color(tone(for: lane)))
+            }
+        }
+
+        if let hover {
+            context.fill(Path(ellipseIn: CGRect(x: hover.location.x - 5.5, y: hover.location.y - 5.5, width: 11, height: 11)), with: .color(tone(for: hover.lane).opacity(0.28)))
+            context.fill(Path(ellipseIn: CGRect(x: hover.location.x - 3.4, y: hover.location.y - 3.4, width: 6.8, height: 6.8)), with: .color(tone(for: hover.lane)))
+        }
+
+        context.draw(Text(String(format: "%.0f t/s", layout.maxY)).font(.caption2).foregroundStyle(.white.opacity(0.30)), at: CGPoint(x: layout.plot.maxX, y: layout.plot.minY), anchor: .trailing)
+        let leftLabel = scope == "today" ? shortTime(layout.minDate) : shortAxis(layout.minDate)
+        let rightLabel = scope == "today" ? shortTime(layout.maxDate) : shortAxis(layout.maxDate)
+        context.draw(Text(leftLabel).font(.caption2).foregroundStyle(.white.opacity(0.32)), at: CGPoint(x: layout.plot.minX, y: size.height - 8), anchor: .leading)
+        context.draw(Text(rightLabel).font(.caption2).foregroundStyle(.white.opacity(0.32)), at: CGPoint(x: layout.plot.maxX, y: size.height - 8), anchor: .trailing)
+    }
+
+    private func makeChartLayout(size: CGSize) -> ReportChartLayout? {
+        guard !points.isEmpty else { return nil }
+        let dates = points.map(\.date).sorted()
+        let rawMinDate = dates.first ?? Date()
+        let rawMaxDate = dates.last ?? rawMinDate
+        let span = rawMaxDate.timeIntervalSince(rawMinDate)
+        let minWindow = scope == "today" ? 3600.0 : 86400.0
+        let pad = scope == "today" ? 300.0 : 43200.0
+        let minDate = scope == "today" && span < minWindow ? rawMaxDate.addingTimeInterval(-minWindow) : rawMinDate.addingTimeInterval(-pad)
+        let maxDate = rawMaxDate.addingTimeInterval(pad)
+        let maxY = niceCeiling(max(points.map(\.tps).max() ?? 1, 1) * 1.08)
+        let plot = CGRect(x: 12, y: 12, width: size.width - 24, height: size.height - 36)
+        return ReportChartLayout(minDate: minDate, maxDate: maxDate, minWindow: minWindow, maxY: maxY, plot: plot)
+    }
+
+    private func nearestPoint(to location: CGPoint, in size: CGSize) -> ReportChartHover? {
+        guard let layout = makeChartLayout(size: size), layout.plot.insetBy(dx: -16, dy: -16).contains(location) else { return nil }
+        var closest: (row: MiniDay, location: CGPoint, distance: CGFloat)?
+        for row in points {
+            let point = layout.point(for: row)
+            let dx = point.x - location.x
+            let dy = point.y - location.y
+            let distance = dx * dx + dy * dy
+            if closest == nil || distance < closest!.distance {
+                closest = (row, point, distance)
+            }
+        }
+        guard let closest, closest.distance <= 22 * 22 else { return nil }
+        return ReportChartHover(date: closest.row.date, lane: closest.row.lane, tps: closest.row.tps, tokens: closest.row.tokens, location: closest.location)
+    }
+
+    private func tooltipPosition(for hover: ReportChartHover, in size: CGSize) -> CGPoint {
+        let tooltipWidth: CGFloat = 166
+        let tooltipHeight: CGFloat = 88
+        let xOffset = hover.location.x > size.width - tooltipWidth - 20 ? -tooltipWidth / 2 - 14 : tooltipWidth / 2 + 14
+        let x = min(max(hover.location.x + xOffset, tooltipWidth / 2), size.width - tooltipWidth / 2)
+        let y = min(max(hover.location.y - tooltipHeight / 2 - 16, tooltipHeight / 2), size.height - tooltipHeight / 2)
+        return CGPoint(x: x, y: y)
+    }
+}
+
+struct ReportChartLayout {
+    let minDate: Date
+    let maxDate: Date
+    let minWindow: TimeInterval
+    let maxY: Double
+    let plot: CGRect
+
+    func point(for row: MiniDay) -> CGPoint {
+        let xSpan = max(maxDate.timeIntervalSince(minDate), minWindow)
+        let x = plot.minX + plot.width * CGFloat(row.date.timeIntervalSince(minDate) / xSpan)
+        let y = plot.maxY - plot.height * CGFloat(row.tps / maxY)
+        return CGPoint(x: x, y: y)
+    }
+}
+
+struct ReportChartHover {
+    let date: Date
+    let lane: String
+    let tps: Double
+    let tokens: Double
+    let location: CGPoint
+}
+
+struct ReportChartTooltip: View {
+    let hover: ReportChartHover
+    let scope: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(tone(for: hover.lane))
+                    .frame(width: 7, height: 7)
+                Text(cleanMode(hover.lane))
+                    .foregroundStyle(.white.opacity(0.82))
+            }
+            Text(String(format: "%.1f t/s", hover.tps))
+                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.94))
+                .monospacedDigit()
+            HStack(spacing: 8) {
+                Text(chartHoverDate(hover.date, scope: scope))
+                Text("\(compact(Int64(hover.tokens))) tokens")
+            }
+            .foregroundStyle(.white.opacity(0.48))
+        }
+        .font(.system(size: 11, weight: .bold, design: .rounded))
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(Color(red: 0.045, green: 0.047, blue: 0.055).opacity(0.96), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.10)))
+        .shadow(color: .black.opacity(0.35), radius: 14, x: 0, y: 8)
     }
 }
 
@@ -331,12 +458,15 @@ struct ReportModelRows: View {
 struct ReportRecentRows: View {
     let recent: [RecentTurn]
     var body: some View {
-        VStack(spacing: 10) {
-            ForEach(recent.prefix(7)) { turn in
-                ReportRow(left: compactDate(turn.completedAt), mid: "\(cleanMode(turn.mode)) · \(cleanReasoning(turn.reasoning))", right: String(format: "%.1f t/s", turn.tps), tone: tone(for: turn.mode))
+        ScrollView(.vertical) {
+            LazyVStack(spacing: 10) {
+                ForEach(recent) { turn in
+                    ReportRow(left: compactDate(turn.completedAt), mid: "\(cleanMode(turn.mode)) · \(cleanReasoning(turn.reasoning))", right: String(format: "%.1f t/s", turn.tps), tone: tone(for: turn.mode))
+                }
             }
-            Spacer(minLength: 0)
+            .padding(.trailing, 6)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 
@@ -372,6 +502,12 @@ func compactDate(_ raw: String) -> String {
     guard let date = parseISO(raw) else { return raw }
     let f = DateFormatter()
     f.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "MM-dd HH:mm"
+    return f.string(from: date)
+}
+
+func chartHoverDate(_ date: Date, scope: String) -> String {
+    let f = DateFormatter()
+    f.dateFormat = scope == "today" ? "HH:mm" : "MM-dd HH:mm"
     return f.string(from: date)
 }
 

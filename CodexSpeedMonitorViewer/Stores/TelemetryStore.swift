@@ -429,7 +429,7 @@ final class TelemetryStore: ObservableObject {
         from \(source.speedTable)
         where \(trusted)
         order by completed_at desc
-        limit 10
+        limit 60
         """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }

@@ -19,5 +19,6 @@ struct CodexSpeedMonitorMenuApp: App {
             ReportView(store: store)
         }
         .defaultSize(width: 1040, height: 720)
+        .windowResizability(.contentMinSize)
     }
 }
